@@ -1,0 +1,5 @@
+User Listening History.csv
+*.csv
+__pycache__/
+*.pyc
+.env
