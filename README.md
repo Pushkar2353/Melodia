@@ -1,7 +1,5 @@
 # 🎵 Melodia — Hybrid Music Recommendation System
 
-> CSC 6740: Data Mining · Team: Data Miners · Sai Priyank Nanda Kumar, Pushkar Cherukuri
-
 A three-signal hybrid recommender that combines **Collaborative Filtering**, **Content-Based Audio Analysis**, and **MMR Diversity Re-ranking** — deployed as an interactive Streamlit web app.
 
 ---
@@ -194,16 +192,6 @@ All installable with a single `pip install streamlit pandas numpy scikit-learn s
 No GPU required. No API keys required. No database required.
 
 ---
-
-## Academic context
-
-This project was developed for **CSC 6740: Data Mining** as a three-phase project:
-
-| Phase | Deliverable | Status |
-|---|---|---|
-| Phase 1 (Mar 1–13) | Literature review, dataset selection, EDA | ✅ Complete |
-| Phase 2 (Mar 14–27) | System design, preprocessing, baseline experiments | ✅ Complete |
-| Phase 3 (Mar 28–Apr 24) | Full hybrid engine, evaluation, Streamlit app, final report | ✅ Complete |
 
 **Key references:**
 - Koren et al. (2009) — Matrix Factorization for Recommender Systems
