@@ -40,8 +40,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
-MUSIC_FILE = Path("C:\\Users\\pushk\\Downloads\\archive\\Music Info.csv")
-LISTEN_FILE = Path("C:\\Users\\pushk\\Downloads\\archive\\User Listening History.csv")
+BASE_DIR = Path(__file__).resolve().parent
+MUSIC_FILE = BASE_DIR / "Music Info.csv"
+LISTEN_FILE = BASE_DIR / "User Listening History.csv"
 
 MIN_USER_PLAYS = 5
 MIN_SONG_PLAYS = 5
@@ -50,6 +51,12 @@ N_FACTORS    = 50     # ↓ from 100 — biggest startup saving, tiny quality lo
 TOP_N_TAGS   = 50
 MMR_LAMBDA   = 0.30
 RANDOM_STATE = 42
+
+SYNTHETIC_USER_COUNT = 1200
+SYNTHETIC_MIN_TRACKS = 12
+SYNTHETIC_MAX_TRACKS = 35
+SYNTHETIC_MIN_PLAYS = 1
+SYNTHETIC_MAX_PLAYS = 12
 
 WEIGHT_SCHEDULE = [
     (0,  0.00, 0.80, 0.20),
@@ -61,16 +68,79 @@ WEIGHT_SCHEDULE = [
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 1 — LOAD DATA
 # ─────────────────────────────────────────────────────────────────────────────
+def generate_synthetic_listens(
+    music: pd.DataFrame,
+    n_users: int = SYNTHETIC_USER_COUNT,
+    min_tracks: int = SYNTHETIC_MIN_TRACKS,
+    max_tracks: int = SYNTHETIC_MAX_TRACKS,
+    min_play: int = SYNTHETIC_MIN_PLAYS,
+    max_play: int = SYNTHETIC_MAX_PLAYS,
+) -> pd.DataFrame:
+    """Create a synthetic listening history when the real CSV is missing."""
+    music = music.copy()
+    music["genre"] = music["genre"].fillna("Unknown")
+    music["song_id"] = music["song_id"].astype(str)
+
+    genre_counts = music["genre"].value_counts(normalize=True)
+    genres = genre_counts.index.tolist()
+    genre_probs = genre_counts.values.astype(np.float32)
+    genre_to_songs = music.groupby("genre")["song_id"].apply(list).to_dict()
+    all_song_ids = music["song_id"].tolist()
+
+    rng = np.random.default_rng(RANDOM_STATE)
+    rows = []
+    for user_idx in range(n_users):
+        user_id = f"user_{user_idx:04d}"
+        n_genres = int(rng.integers(1, min(3, len(genres)) + 1))
+        chosen_genres = rng.choice(genres, size=n_genres, replace=False,
+                                   p=genre_probs)
+        candidate_songs = list({sid for genre in chosen_genres for sid in genre_to_songs.get(genre, [])})
+        if len(candidate_songs) < min_tracks:
+            candidate_songs = all_song_ids
+
+        n_tracks = int(rng.integers(min_tracks, max_tracks + 1))
+        n_tracks = min(n_tracks, len(candidate_songs))
+        selected = rng.choice(candidate_songs, size=n_tracks, replace=False)
+
+        for song_id in selected:
+            rows.append({
+                "user_id": user_id,
+                "song_id": song_id,
+                "play_count": int(rng.integers(min_play, max_play + 1)),
+            })
+
+    listen = pd.DataFrame(rows)
+    listen = listen.groupby(["user_id", "song_id"], as_index=False)["play_count"].sum()
+    return listen
+
+
 def load_data():
     music = pd.read_csv(MUSIC_FILE, low_memory=False, encoding="utf-8-sig")
-    listen = pd.read_csv(LISTEN_FILE, low_memory=False, encoding="utf-8-sig",
-                         usecols=["track_id", "user_id", "playcount"])
     music.columns  = music.columns.str.strip().str.lstrip("\ufeff")
-    listen.columns = listen.columns.str.strip().str.lstrip("\ufeff")
-    listen["playcount"] = pd.to_numeric(listen["playcount"], errors="coerce").fillna(0)
-    listen = listen[listen["playcount"] > 0].copy()
-    music  = music.rename(columns={"track_id": "song_id", "name": "title"})
-    listen = listen.rename(columns={"track_id": "song_id", "playcount": "play_count"})
+    music = music.rename(columns={"track_id": "song_id", "name": "title"})
+    music["song_id"] = music["song_id"].astype(str)
+
+    if LISTEN_FILE.exists():
+        listen = pd.read_csv(LISTEN_FILE, low_memory=False, encoding="utf-8-sig")
+        listen.columns = listen.columns.str.strip().str.lstrip("\ufeff")
+        if "track_id" in listen.columns:
+            listen = listen.rename(columns={"track_id": "song_id"})
+        if "playcount" in listen.columns:
+            listen = listen.rename(columns={"playcount": "play_count"})
+        listen = listen.rename(columns={"song_id": "song_id"})
+        listen = listen[listen["play_count"].notna()].copy()
+        listen["play_count"] = pd.to_numeric(listen["play_count"], errors="coerce").fillna(0)
+        listen = listen[listen["play_count"] > 0].copy()
+        listen["song_id"] = listen["song_id"].astype(str)
+        print(f"  Loaded  {len(music):,} tracks  |  {len(listen):,} events  |  "
+              f"{listen['user_id'].nunique():,} users from {LISTEN_FILE.name}")
+    else:
+        print("  Listening history file not found. Generating synthetic history...")
+        listen = generate_synthetic_listens(music)
+        listen.to_csv(LISTEN_FILE, index=False)
+        print(f"  Generated synthetic User Listening History with "
+              f"{listen['user_id'].nunique():,} users and {len(listen):,} events")
+
     print(f"  Loaded  {len(music):,} tracks  |  {len(listen):,} events  |  "
           f"{listen['user_id'].nunique():,} users")
     return music, listen
@@ -104,7 +174,7 @@ def fill_genre_from_tags(music: pd.DataFrame) -> pd.DataFrame:
         return None
     df.loc[missing, "genre"] = df.loc[missing, "tags"].apply(infer)
     after = df["genre"].isna().sum()
-    print(f"  Genre fill: {before:,} missing → {after:,} remaining ({before-after:,} filled)")
+    print(f"  Genre fill: {before:,} missing -> {after:,} remaining ({before-after:,} filled)")
     return df
 
 
@@ -176,7 +246,7 @@ def build_content_features(music: pd.DataFrame, top_n_tags: int = TOP_N_TAGS):
                 tag_matrix[row_i, tag_to_col[tag.strip()]] = 1.0
     X = np.hstack([X_audio, loudness, tempo, key_sin, key_cos, mode,
                    decade_sin, decade_cos, X_genre, tag_matrix]).astype(np.float32)
-    print(f"  Content features: {X.shape[0]:,} songs × {X.shape[1]} features")
+    print(f"  Content features: {X.shape[0]:,} songs x {X.shape[1]} features")
     return X
 
 
@@ -420,16 +490,17 @@ def recommend_for_user(user_id, music, listen, X_content, collab_model, top_n=10
     for i, sid in enumerate(song_ids_cand):
         info = song_lookup.get(sid, {})
         rows.append({
-            "song_id":       sid,
-            "title":         info.get("title", "Unknown"),
-            "artist":        info.get("artist", "Unknown"),
-            "genre":         info.get("genre", "Unknown"),
-            "year":          int(info.get("year", 0) or 0),
-            "tags":          info.get("tags", ""),
-            "cf_score":      float(cand_cf[i]),
-            "content_score": float(cand_content[i]),
-            "novelty_score": float(cand_novelty[i]),
-            "final_score":   float(final_scores[i]),
+            "song_id":          sid,
+            "title":            info.get("title", "Unknown"),
+            "artist":           info.get("artist", "Unknown"),
+            "genre":            info.get("genre", "Unknown"),
+            "year":             int(info.get("year", 0) or 0),
+            "tags":             info.get("tags", ""),
+            "spotify_preview_url": info.get("spotify_preview_url", ""),
+            "cf_score":         float(cand_cf[i]),
+            "content_score":    float(cand_content[i]),
+            "novelty_score":    float(cand_novelty[i]),
+            "final_score":      float(final_scores[i]),
         })
 
     candidates_df = (pd.DataFrame(rows)
@@ -476,7 +547,7 @@ def main():
     print("\n[5/5] Training collaborative filter...")
     collab_model = build_collaborative_model(listen, music)
 
-    print(f"\n  ✅ Startup complete in {time.time()-t_start:.1f}s")
+    print(f"\n  Startup complete in {time.time()-t_start:.1f}s")
 
     # Benchmark 5 users
     sample_users = listen["user_id"].value_counts().index[:5].tolist()
@@ -486,7 +557,7 @@ def main():
         recs = recommend_for_user(uid, music, listen, X_content, collab_model, top_n=10)
         elapsed = time.time() - t0
         n = listen[listen["user_id"]==uid]["song_id"].nunique()
-        print(f"  {uid[:20]}...  {n:3d} songs  →  {elapsed:.3f}s  "
+        print(f"  {uid[:20]}...  {n:3d} songs  ->  {elapsed:.3f}s  "
               f"| top: {recs.iloc[0]['title'][:30]} by {recs.iloc[0]['artist']}")
 
     return music, listen, X_content, collab_model
